@@ -99,7 +99,19 @@ class ModbusPlatform {
     for (let type in this.maxModbus) {
       let idx = this.minModbus[type];
       let count = 1+this.maxModbus[type]-idx;
-      this.commands.push({"cmd":'r', "type":type, "add":idx, "count":count});
+
+      let maxBatchReadCount = 120
+
+      //Log("Count:", count);
+      if (count > maxBatchReadCount) {
+        //Log("--------1", idx, maxBatchReadCount);
+        this.commands.push({"cmd":'r', "type":type, "add":idx, "count":maxBatchReadCount, "mode":'pt1'});
+        //Log("--------2", idx+maxBatchReadCount, count-maxBatchReadCount);
+        this.commands.push({"cmd":'r', "type":type, "add":idx+maxBatchReadCount, "count":count-maxBatchReadCount, "mode":'pt2'});
+      } else {
+        this.commands.push({"cmd":'r', "type":type, "add":idx, "count":count, "mode":'normal'});
+      }
+
     }
     this.commands.push({"cmd":'x'});
 
@@ -121,15 +133,37 @@ class ModbusPlatform {
     this.commandTime = Date.now();
 
     if (this.command.cmd == 'w') {
-      this.modbus[{'c':'WriteSingleCoil', 'r':'writeSingleRegister'}[this.command.type]](this.command.add-1, Math.round(this.command.val));
+      this.modbus[{'c':'writeSingleCoil', 'r':'writeSingleRegister'}[this.command.type]](this.command.add-1, Math.round(this.command.val));
       this.command = null;
       if (this.commands.length)
         this.socket.emit('modbus');
     }
 
     else if (this.command.cmd == 'r') {
+
       this.modbus[{'c':'readCoils', 'r':'readHoldingRegisters', 'i':'readInputRegisters'}[this.command.type]](this.command.add-1, this.command.count).then((resp) => {
-        this.status[this.command.type] = resp.response._body.valuesAsArray;
+        
+        let mode = this.command.mode;
+        if (mode == 'pt1') {
+          // send 
+          //Log("pt1", resp.response._body.valuesAsArray.length);
+          this.status[this.command.type] = resp.response._body.valuesAsArray;
+          //Log(this.status[this.command.type]);
+          //Log(this.status[this.command.type].length);
+        } else if (mode == 'pt2') {
+          //send and append/push
+          //Log("pt2", resp.response._body.valuesAsArray.length);
+          //Log("pt2", resp.response._body.valuesAsArray);
+          //this.status[this.command.type].push(resp.response._body.valuesAsArray);
+          this.status[this.command.type] = this.status[this.command.type].concat(resp.response._body.valuesAsArray);
+          //Log(this.status[this.command.type]);
+          //Log(this.status[this.command.type].length);
+        } else {
+          // Normal
+          this.status[this.command.type] = resp.response._body.valuesAsArray;
+        }
+
+        // Cleanup
         this.command = null;
         if (this.commands.length)
           this.socket.emit('modbus');
@@ -175,7 +209,6 @@ class ModbusAccessory {
   }
 
   getServices() {
-
     let services = [];
     let service = new Service.AccessoryInformation();
     service
@@ -243,6 +276,12 @@ class ModbusAccessory {
         if ('maxValue' in modbusMap) {
           characteristic.props.maxValue = modbusMap.maxValue;
         }
+  if ('minValue' in modbusMap) {
+          characteristic.props.minValue = modbusMap.minValue;
+        }
+        if ('minStep' in modbusMap) {
+          characteristic.props.minStep = modbusMap.minStep;
+        }
         if ('value' in modbusMap) {
           characteristic.setValue(modbusMap.value);
           if (!('address' in cfg))
@@ -265,21 +304,32 @@ class ModbusAccessory {
         }
         if (!modbusMap.readonly) {
           characteristic.on('set', (val, callback) => {
-            Log("setting", this.name, characteristic.displayName, "to", val);
+            //Log("setting", this.name, characteristic.displayName, "to", val);
             this.lastUpdate = Date.now();
+            
+            // To be Mapped
+              if ('map' in modbusMap) {
+                for (let v1 in modbusMap.map) {
+                  if (modbusMap.map[v1] == val) {
+                    Log("--mathced--");
+                    val = parseInt(v1);
+                    break;
+                  }
+                }
+              }
+            
             if (characteristic.props.format == 'bool') {
               val = val ? 1 : 0;
             }
-            if ('map' in modbusMap) {
-              for (let v1 in modbusMap.map) {
-                if (modbusMap.map[v1] == val) {
-                  val = parseInt(v1);
-                  break;
-                }
-              }
-            }
+              
+           
+              
             if ('mask' in modbusMap) {
               val = val & modbusMap.mask;
+            }
+      if ('multiplier' in modbusMap) {
+              val = val * modbusMap.multiplier;
+              //Log("-----------val:", val);
             }
             this.platform.writeModbus(modbusType, modbusAdd, val);
             callback();
@@ -302,10 +352,15 @@ class ModbusAccessory {
     if (Date.now() < this.lastUpdate + 1000 && !this.platform.firstInit) {
       return;
     }
+    //Log("------update:", val, map);
     if ('mask' in map) {
       val = val & map.mask;
     }
+    if ('multiplier' in map) {
+       val = val / map.multiplier;
+    }
     if ('map' in map && (val.toString() in map.map)) {
+      //Log("-----update map", map)
       val = map.map[val.toString()];
     }
     if (characteristic.props.format == 'bool') {
